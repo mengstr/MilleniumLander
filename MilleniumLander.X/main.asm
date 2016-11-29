@@ -6,8 +6,10 @@
 ;
 ; Code available at github.com/SmallRoomLabs/MilleniumLander
 ;
+; Max allowed code size is 585 (0x249) words @ 14 bits
 ;
-    #define UART    1
+    
+#define UART    1
     
 #include <p16f1705.inc>
     
@@ -32,35 +34,25 @@ InterrupVector code 0x0004
 ;----------------------------------------------------------------------------
 ; Variable declarations
 ;----------------------------------------------------------------------------
-    errorlevel -207     ; Turn off label-not-in-column-1 warnings
-                        ; for the variable declarations
+    errorlevel -207     ; Turn off the annoying label-not-in-column-1 warnings
             
 dum1 udata
     randomH	res 1
     randomL	res 1
 
-    BIN0    res 1
-    BIN1    res 1
-    BIN2    res 1
+    binU    res 1
+    binH    res 1
+    binL    res 1
     cycles  res 1
+    displays res 1
     BINCNT  res 1
     DIGITCNT  res 1
     DECCNT  res 1
-    digit1  res 1
-    digit2  res 1
-    digit3  res 1
-    digit4  res 1
-    digit5  res 1
-    digit6  res 1
-    digit7  res 1
-    digit8  res 1
     
     RegAE   res 1
     RegA0   res 1
     RegA1   res 1
     RegA2   res 1
-    binH    res 1
-    binL    res 1
     bcdU    res 1
     bcdH    res 1
     bcdL    res 1
@@ -82,19 +74,65 @@ displaybuffers udata
  
 dum2 udata_shr 	
     altitude	res 2
+    latitude    res 2
+    vspeed      res 1
+    hspeed      res 1
+    fuel        res 2
+    angle       res 1
+    wind        res 1
+    targetA     res 2
+    targetL     res 2
+    score       res 2 
 
     errorlevel +207     ; Turn warnings back on again
 ;----------------------------------------------------------------------------
- 
-     code
-;
-;
-;
-Main:
-    banksel randomH
-    INCF    randomH, F
+NEG16 MACRO DST
+    comf    DST+0,F
+    comf    DST+1,F
+    movlw   0
+    bsf     STATUS,C 
+    addwfc  DST+0,F
+    addwfc  DST+1,F     
+    ENDM
 
-#ifdef UART ; Initialize the HW UART for Console Debugging
+    code
+
+#ifdef UART
+
+#define BACKSPACE  8
+    
+GetHeaderChar:
+    addwf PCL
+    dt "\nMillenium Lander\n\n"
+    dt "Altitude "
+    dt "Latitude "
+    dt "  Vspeed "
+    dt "  Hspeed "
+    dt "    Fuel "
+    dt "   Angle "
+    dt "    Wind "
+    dt " TargetA "
+    dt " TargetL "
+    dt "   Score "
+    dt "\n",0
+
+PrintHeader:
+    banksel DECCNT
+    CLRF    DECCNT
+PrintHeaderLoop:
+    movf    DECCNT,W
+    incf    DECCNT,F
+    call    GetHeaderChar
+    xorlw   0x00            ; Exit when got 0x00
+    btfsc   STATUS,Z
+    return
+    banksel TX1REG
+    movwf   TX1REG
+    GOTO    PrintHeaderLoop
+;
+; Initialize the HW UART for Console Debugging
+;
+InitUART:
     movlw   0x20        ; Enable EUSART Async TX
     banksel TX1STA
     movwf   TX1STA
@@ -104,43 +142,211 @@ Main:
     movlw   0x00        ; EUSART continous mode
     banksel BAUD1CON
     movwf   BAUD1CON
+    return
+
+PrintDisplayBuf:
+    movlw   BACKSPACE
     banksel TX1REG
-    movlw   'M'
     movwf   TX1REG
-    movlw   'i'
+
+    banksel FSR0H
+    movlw   HIGH(dispbuf+7)
+    movwf   FSR0H
+    movlw   LOW(dispbuf+7)
+    movwf   FSR0L
+    banksel displays
+    movlw   DISPCNT     ; Number of displays
+    movwf   displays
+pdb0:
+    banksel cycles
+    movlw   DISPLEN       ; 8 digits on each display
+    movwf   cycles
+pdb1:
+    movf    INDF0,W
+    decf    FSR0L,F
+    addlw   0x30
+    banksel TX1REG
     movwf   TX1REG
-    movlw   'l'
-    movwf   TX1REG
-    movlw   'l'
-    movwf   TX1REG
-    movlw   'e'
-    movwf   TX1REG
-    movlw   'n'
-    movwf   TX1REG
-    movlw   'i'
-    movwf   TX1REG
-    movlw   'u'
-    movwf   TX1REG
-    movlw   'm'
-    movwf   TX1REG
+    banksel cycles
+    decfsz  cycles,F
+    goto    pdb1
     movlw   ' '
+    banksel TX1REG
     movwf   TX1REG
-    movlw   'L'
-    movwf   TX1REG
-    movlw   'a'
-    movwf   TX1REG
-    movlw   'n'
-    movwf   TX1REG
-    movlw   'd'
-    movwf   TX1REG
-    movlw   'e'
-    movwf   TX1REG
-    movlw   'r'
-    movwf   TX1REG
-    movlw   0x0a
-    movwf   TX1REG
+
+    movlw   DISPLEN*2     ; Jump to end of next display
+    addwf   FSR0,F
+
+    banksel displays
+    decfsz  displays,F
+    goto    pdb0
+    return
+    
 #endif
 
+    ;
+    ; Takes about 3.25ms with all 0  
+    ;
+RefreshDisplay:
+    banksel FSR0H           ; The display location will autoincrement correctly
+    movlw   HIGH(display0)  ; so we only need to set this once
+    movwf   FSR0H
+    movlw   LOW(display0)
+    movwf   FSR0L
+
+    banksel binU
+    clrf    binU            ; This only needs to be cleared before first call 
+                            ; since the Uint24ToAscii will clear them at exit
+
+    movf    altitude+0,W
+    movwf   binL
+    movf    altitude+1,W
+    movwf   binH
+    call    Uint24ToAscii
+    
+    banksel binU
+    movf    latitude+0,W
+    movwf   binL
+    movf    latitude+1,W
+    movwf   binH
+    call    Uint24ToAscii
+
+    banksel binU
+    movf    vspeed,W
+    movwf   binL
+    call    Uint24ToAscii
+
+    banksel binU
+    movf    hspeed,W
+    movwf   binL
+    call    Uint24ToAscii
+    
+    banksel binU
+    movf    fuel+0,W
+    movwf   binL
+    movf    fuel+1,W
+    movwf   binH
+    call    Uint24ToAscii
+
+    banksel binU
+    movf    angle,W
+    movwf   binL
+    call    Uint24ToAscii
+
+    banksel binU
+    movf    wind,W
+    movwf   binL
+    call    Uint24ToAscii
+    
+    banksel binU
+    movf    targetA+0,W
+    movwf   binL
+    movf    targetA+1,W
+    movwf   binH
+    call    Uint24ToAscii
+
+    banksel binU
+    movf    targetL+0,W
+    movwf   binL
+    movf    targetL+1,W
+    movwf   binH
+    call    Uint24ToAscii
+
+    banksel binU
+    movf    score+0,W
+    movwf   binL
+    movf    score+1,W
+    movwf   binH
+    call    Uint24ToAscii
+
+#ifdef UART 
+    call    PrintDisplayBuf
+#endif
+    return
+
+    
+    
+;   
+; .Altitude  8976..9999      8976+rand()&0x3FF
+; ?Latitude  -1023..1023     rand()&0x3FF , random negate
+; .TargetA   0..1023         rand()&0x3FF
+; ?TargetL   -511..511       rand()&0x1FF , random negate
+; .Fuel      1000            1000
+; ?Wind      -64..64         rand()0x3F , random negate
+; .Vspeed    0
+; .Hspeed    0
+; .Angle     0
+; .Score     0
+;
+;
+InitGame:
+    clrf    score+0     ; Just these to zero
+    clrf    score+1
+    clrf    vspeed  
+    clrf    hspeed  
+    clrf    angle   
+    movlw   LOW(1000)
+    movwf   fuel+0
+    movlw   HIGH(1000)
+    movwf   fuel+1
+    
+    call    Random      ; Altitude 8976..9999
+    movf    randomL,W     ; ...first store 0..1023 random
+    movwf   altitude+0
+    movf    randomH,W
+    andlw   0x03  
+    movwf   altitude+1
+    movlw   LOW(8976)   ; ...then add 8976
+    addwf   altitude+0,F
+    movlw   HIGH(8976)
+    addwfc  altitude+1,F
+    
+    call    Random      ; Latitude -1023..1023
+    movf    randomL,W     ; ...first store 0..1023 random
+    movwf   latitude+0
+    movf    randomH,W
+    andlw   0x03  
+    movwf   latitude+1
+    ;TODO NEGATE
+
+    call    Random      ; TargetA 0..1023
+    movf    randomL,W
+    movwf   targetA+0
+    movf    randomH
+    andlw   0x03  
+    movwf   targetA+1
+    
+    call    Random      ; TargetL -511..511
+    movf    randomL,W
+    movwf   targetL+0
+    movf    randomH,W
+    andlw   0x01   
+    movwf   targetL+1
+    ;TODO NEGATE
+
+    
+    call    Random      ; Wind -63..63
+    movf    randomL,W
+    andlw   0x3F   
+    movwf   wind
+    ;TODO NEGATE
+
+    return
+    
+    
+ ;
+;
+;
+Main:
+    banksel randomH
+    INCF    randomH, F
+
+#ifdef UART 
+    call    InitUART
+    call    PrintHeader
+    call    PrintDisplayBuf
+#endif
+    
  ;   banksel binL
  ;   movlw   LOW(12345)
  ;   movwf   binL
@@ -159,75 +365,10 @@ Main:
  ;   movlw   0x0a
  ;   movwf   TX1REG
 
-    banksel BIN0
-    movlw   LOW(14345678>>0)
-    movwf   BIN0
-    movlw   LOW(14345678>>8)
-    movwf   BIN1
-    movlw   LOW(14345678>>16)
-    movwf   BIN2
-
-    call    bin2dec
- 
- 
-    banksel digit8
-    movf    digit8,W
-    addlw   0x30
-    banksel TX1REG
-    movwf   TX1REG
-    
-    
-    banksel digit7
-    movf    digit7,W
-    addlw   0x30
-    banksel TX1REG
-    movwf   TX1REG
-    
-    
-    banksel digit6
-    movf    digit6,W
-    addlw   0x30
-    banksel TX1REG
-    movwf   TX1REG
-
-    banksel digit5
-    movf    digit5,W
-    addlw   0x30
-    banksel TX1REG
-    movwf   TX1REG
-
-    banksel digit4
-    movf    digit4,W
-    addlw   0x30
-    banksel TX1REG
-    movwf   TX1REG
- 
-    
-    banksel digit3
-    movf    digit3,W
-    addlw   0x30
-    banksel TX1REG
-    movwf   TX1REG
-
-    
-    banksel digit2
-    movf    digit2,W
-    addlw   0x30
-    banksel TX1REG
-    movwf   TX1REG
- 
-    banksel digit1
-    movf    digit1,W
-    addlw   0x30
-    banksel TX1REG
-    movwf   TX1REG
-
-    banksel TX1REG
-    movlw   0x0a
-    movwf   TX1REG
-
 
 foo:
+    call    InitGame
+    call    RefreshDisplay
     CALL    Random
     GOTO    foo
 
@@ -323,46 +464,55 @@ Random:
     XORWF   randomL,F    
     RETURN
 
-    
-bin2dec:
-    clrf	digit1
-	clrf	digit2
-	clrf	digit3
-	clrf	digit4
-	clrf	digit5
-	clrf	digit6
-	clrf	digit7
-	clrf	digit8	
-    MOVLW 24       ; Decimal count
-	MOVWF BINCNT
+;
+; Converts 24 bit binary held at binU,binH,binL into
+; an ASCII string pointed to by FSR0H,FSR0L
+;
+Uint24ToAscii:
+    banksel DECCNT
+	movlw   DISPLEN     ; Clear display buffer
+	movwf   DECCNT
+_clr1:
+    movlw   0x00        ; Store zero 
+    movwf   INDF0
+	incf    FSR0,F
+	decfsz  DECCNT,F    ; Loop until all digits
+	goto    _clr1  
+
+    movlw   24          ; Decimal count
+	movwf   BINCNT
 
 BITLP:
-	RLF BIN0,F     ; Shift binary left
-	RLF BIN1,F     
-	RLF BIN2,F
-    movlw HIGH(digit1)
-	MOVWF FSR0H
-    MOVLW digit1
-	MOVWF FSR0L
-	MOVLW 8        ; Count for the decimal digits
-	MOVWF DECCNT
-	MOVLW 6        ; The Working Register holds 6 throughout. For each bit the inner loop is repeated 8 times, with shift in of the next bit, "times 2" and DecAdj of each digit
+    movlw   DISPLEN     ; Go back to beginning of display buf again...
+    subwf   FSR0,F      ; ...ajusts bot for the clear above and the rounds
+	rlf     binL,F      ; Shift binary left
+	rlf     binH,F     
+	rlf     binU,F
+	movlw   DISPLEN     ; Count for the decimal digits
+	movwf   DECCNT
+	movlw   6           ; The Working Register holds 6 throughout. For each bit the inner loop is repeated 8 times, with shift in of the next bit, "times 2" and DecAdj of each digit
 
 ADJLP:
-	RLF INDF0,F     ; 2*digit, then shift in "next bit?? for DIGIT0 or else the carry from the previous digit
-	ADDWF INDF0,F   ; Add 6, clears Cf and gives 1 in bit 4 if the
-	BTFSS INDF0,4   ; addition is needed; zero if not, when
-	SUBWF INDF0,F   ; we subtract it again. Sets Cf
-	BSF STATUS,C   ; Cf could be 0 or 1, so make it 1 as default
-	BTFSS INDF0,4   ; Bit 4 is the carry to the next digit
-	BCF STATUS,C   ; Reset Cf to zero if bit 4 is clear
-	BCF INDF0,4     ; For BCD clear bit 4 in case it?s one
-	INCF FSR0,F     ; Go to next digit, (Cf not affected)
-	DECFSZ DECCNT,F ; End of inner loop. check digit count and
-	GOTO ADJLP     ; round again if it?s not zero
-	DECFSZ BINCNT,F ; End of outer loop, one pass through digits,
-	GOTO BITLP     ; check bit count and repeat if necessary.
-	RETURN
-    
-
+	RLF     INDF0,F     ; 2*digit, then shift in "next bit?? for DIGIT0 or else the carry from the previous digit
+	ADDWF   INDF0,F     ; Add 6, clears Cf and gives 1 in bit 4 if the
+	BTFSS   INDF0,4     ; addition is needed; zero if not, when
+	SUBWF   INDF0,F     ; we subtract it again. Sets Cf
+	BSF     STATUS,C    ; Cf could be 0 or 1, so make it 1 as default
+	BTFSS   INDF0,4     ; Bit 4 is the carry to the next digit
+	BCF     STATUS,C    ; Reset Cf to zero if bit 4 is clear
+	BCF     INDF0,4     ; For BCD clear bit 4 in case it?s one
+	INCF    FSR0,F      ; Go to next digit, (Cf not affected)
+	DECFSZ  DECCNT,F    ; End of inner loop. check digit count and
+	GOTO    ADJLP       ; ...round again if it?s not zero
+    DECFSZ  BINCNT,F    ; End of outer loop, one pass through digits,
+	GOTO    BITLP       ; ...check bit count and repeat if necessary.
+    clrf    binU        ; Clear the input registers to save code for next call
+    clrf    binH
+    clrf    binL
+	return
+;
+; Core registers    
+;  INDF0 INDF1 PCL STATUS FSR0L FSR0H FSR1L FSR1H BSR WREG PCLATH INTCON
+;
     end
+
